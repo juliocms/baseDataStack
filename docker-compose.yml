@@ -1,0 +1,138 @@
+name: basedatastack
+
+services:
+  emulator:
+    build:
+      context: ./emulator
+    image: basedatastack/aws-emulator
+    init: true
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      HOME: /home/emulator
+      EMULATOR_BIND_ADDRESS: 0.0.0.0
+      EMULATOR_PORT: "9297"
+    volumes:
+      - emulator-state:/home/emulator/.aws
+    ports:
+      - "127.0.0.1:9297:9297"
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-sf",
+          "--cacert",
+          "/home/emulator/.aws/emulator/9297/ca.pem",
+          "https://127.0.0.1:9297/__admin/health",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+
+  spark:
+    build:
+      context: ./spark
+    image: basedatastack/pyspark
+    init: true
+    network_mode: service:emulator
+    depends_on:
+      emulator:
+        condition: service_healthy
+    mem_limit: 3g
+    environment:
+      EMULATOR_DIR: /aws/emulator/9297
+      EMULATOR_PORT: "9297"
+      LAKE_BUCKET: lakehouse
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - emulator-state:/aws:ro
+      - spark-events:/opt/spark-events
+      - ./spark/jobs:/opt/app/jobs:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
+  spark-history:
+    build:
+      context: ./spark
+      dockerfile: history.Dockerfile
+    image: basedatastack/spark-history
+    init: true
+    mem_limit: 1g
+    ports:
+      - "127.0.0.1:18080:18080"
+    volumes:
+      - spark-events:/opt/spark-events:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  airflow:
+    build:
+      context: ./airflow
+    image: basedatastack/airflow
+    init: true
+    network_mode: service:emulator
+    depends_on:
+      emulator:
+        condition: service_healthy
+      spark:
+        condition: service_healthy
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__CORE__FERNET_KEY: "A8_JkCis51bpGUtTc4p9mnKgNSpCuhmZ95V7MEDAXqE="
+      AIRFLOW__WEBSERVER__SECRET_KEY: "basedatastack-local"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+      AIRFLOW_ADMIN_USER: admin
+      AIRFLOW_ADMIN_PASSWORD: admin
+      EMULATOR_DIR: /aws/emulator/9297
+      EMULATOR_PORT: "9297"
+      LAKE_BUCKET: lakehouse
+      SPARK_JOB_URL: http://127.0.0.1:8091
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - emulator-state:/aws:ro
+      - ./airflow/dags:/opt/airflow/dags
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 24
+      start_period: 40s
+
+volumes:
+  emulator-state:
+  spark-events:
